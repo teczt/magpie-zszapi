@@ -333,7 +333,19 @@ test("invalid Keys request a new sign-in without echoing secrets", async (t) => 
   assert.match(usage.error, /API 密钥/);
   assert.ok(!usage.error.includes("sk-invalid"));
   await assert.rejects(hooks.provider.models({}, { auth }), { signIn: "expired" });
-  await assert.rejects(hooks.provider.models({}, { auth: undefined }), { signIn: "expired" });
+  await assert.rejects(
+    hooks.provider.models({}, { auth: { type: "api", key: " " } }),
+    { signIn: "expired" },
+  );
+});
+
+test("discovery before any sign-in keeps the current list quietly", async () => {
+  const hooks = await ZszapiPlugin();
+  const empty = await hooks.provider.models({}, {});
+  assert.deepEqual(Object.keys(empty), []);
+  assert.equal(empty[Symbol.for("magpie.fellBack")], true);
+  const kept = await hooks.provider.models({ models: { a: { id: "a" } } });
+  assert.deepEqual(Object.keys(kept), ["a"]);
 });
 
 test("authenticated queries and generation refuse redirects", async (t) => {

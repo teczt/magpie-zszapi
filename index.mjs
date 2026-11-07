@@ -105,7 +105,14 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
        * propagate so Magpie keeps its previous list; an empty successful list
        * replaces it, including revoked permissions.
        */
-      async models(_provider, { auth } = {}) {
+      async models(provider, { auth } = {}) {
+        // Magpie also asks before any Key is added; keep its current list
+        // quietly instead of logging a sign-in error for an unused provider.
+        if (auth == null) {
+          const kept = { ...(provider?.models || {}) };
+          kept[Symbol.for("magpie.fellBack")] = true;
+          return kept;
+        }
         const account = accountOf(auth, configuredBase);
         const body = await queries.get(account, "/v1/models");
         await nameAccount(client, account, queries, body);
