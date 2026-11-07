@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "执算者AI (zszapi.com) for Magpie: paste one API Key to get GPT / Claude / DeepSeek models with balance in ¥",
   "type": "module",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "files": [
