@@ -5,9 +5,11 @@
 // gateway serves natively for that family. Explicit server protocols, when a
 // future backend reports them, always take precedence over name inference.
 //
-// Non-chat models (image, video, audio, embedding) cannot be used by coding
-// agents through Magpie and are left out, so an image-only group yields an
-// empty list that the usage card explains.
+// Images-API models (gpt-image, dall-e) are listed as image-only models on the
+// OpenAI-compatible package: Magpie offers them in its image generation picker
+// and draws with them at /v1/images/generations and /v1/images/edits. Other
+// non-chat models (video, audio, embedding) cannot be used through Magpie and
+// are left out.
 
 export const PROVIDER = "zszapi";
 
@@ -23,6 +25,11 @@ export const ENDPOINTS = [
 // NON_CHAT recognizes generation endpoints that are not text conversations.
 const NON_CHAT =
   /(?:image|dall-e|sora|video|veo|seedance|kling|imagen|midjourney|tts|whisper|transcribe|audio|speech|embedding|embed|rerank|moderation|realtime)/;
+
+// IMAGES_API recognizes models the gateway draws with on the OpenAI images API.
+// It matches the names Magpie itself draws on that API (catalog.ImagesAPI), so
+// a listed model always reaches the image generation picker.
+const IMAGES_API = /(?:gpt-image|chatgpt-image|dall-e)/;
 
 // FAMILIES lists recognizable model families, their native text protocol and
 // conservative capability defaults (tool calls and input kinds that every
@@ -66,8 +73,18 @@ const FAMILIES = [
  * Composite group prefixes ("work/claude-…") are ignored for recognition only.
  */
 export function familyOf(id) {
-  const name = String(id).slice(String(id).lastIndexOf("/") + 1).toLowerCase();
+  const name = baseName(id);
   return FAMILIES.find((family) => family.test.test(name));
+}
+
+/** baseName returns a model ID without a composite group prefix, lowercased. */
+function baseName(id) {
+  return String(id).slice(String(id).lastIndexOf("/") + 1).toLowerCase();
+}
+
+/** isImageModel reports whether a catalogue entry draws on the images API. */
+export function isImageModel(model) {
+  return IMAGES_API.test(baseName(model.id));
 }
 
 /** isChatModel reports whether a catalogue entry can serve text conversations.
@@ -79,21 +96,24 @@ export function isChatModel(model) {
       ENDPOINTS.some(([id]) => id === protocol),
     );
   }
-  const name = model.id.slice(model.id.lastIndexOf("/") + 1).toLowerCase();
-  return !NON_CHAT.test(name);
+  return !NON_CHAT.test(baseName(model.id));
 }
 
 /** familyLabel summarizes the families present in a catalogue, e.g. "GPT" or
  * "Claude/GPT". It names the account so a customer holding several Keys (one
- * per group) can tell them apart. Unknown families contribute nothing.
+ * per group) can tell them apart. Unknown families contribute nothing; image
+ * models add "生图" last, so an image-only Key reads "生图".
  */
 export function familyLabel(models) {
   const labels = [];
+  let images = false;
   for (const model of models) {
+    if (isImageModel(model)) images = true;
     if (!isChatModel(model)) continue;
     const label = familyOf(model.id)?.label;
     if (label && !labels.includes(label)) labels.push(label);
   }
+  if (images) labels.push("生图");
   return labels.join("/");
 }
 
@@ -136,11 +156,39 @@ export function validateModelProtocols(value) {
   return { ...value };
 }
 
+/** imageModel converts one images-API catalogue entry to a Magpie model that
+ * gives images alone. Magpie lists such a model in its image generation picker
+ * only on the OpenAI-compatible package, and sends it to {api.url}/images/*
+ * through the plugin's fetch.
+ */
+function imageModel(model, base) {
+  return {
+    id: model.id,
+    providerID: PROVIDER,
+    name: model.display_name || model.id,
+    api: { id: model.id, url: base + "/v1", npm: "@ai-sdk/openai-compatible" },
+    capabilities: {
+      reasoning: false,
+      toolcall: false,
+      attachment: false,
+      input: TEXT_IMAGE,
+      output: { text: false, image: true, audio: false, video: false, pdf: false },
+    },
+    limit: {},
+    variants: Object.create(null),
+    status: "active",
+    headers: {},
+    options: {},
+  };
+}
+
 /** runtimeModel converts one catalogue entry to a Magpie model, or undefined
- * when the entry cannot serve text conversations. Server attributes take
- * precedence over family defaults; numeric limits are never invented.
+ * when the entry can serve neither text conversations nor image generation.
+ * Server attributes take precedence over family defaults; numeric limits are
+ * never invented.
  */
 export function runtimeModel(model, base, overrides) {
+  if (isImageModel(model)) return imageModel(model, base);
   if (!isChatModel(model)) return undefined;
   const protocols = protocolsOf(model, overrides);
   const native = Array.isArray(model.native_protocols)

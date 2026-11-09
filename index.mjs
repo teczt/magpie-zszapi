@@ -10,11 +10,12 @@ import { createQueries } from "./queries.mjs";
 import { SITE, currencyOf, usageOf } from "./usage.mjs";
 
 // index.mjs connects Magpie to 执算者AI (https://zszapi.com). A customer pastes
-// one API Key; the plugin discovers that Key's chat models, routes each model
-// family to the protocol the gateway serves natively, and shows the wallet
-// balance in yuan. One Key belongs to one group on the site (GPT, Claude,
-// DeepSeek…), so customers add one Magpie account per Key and Magpie fails
-// over between them. The site owns group selection, pricing and billing.
+// one API Key; the plugin discovers that Key's chat and image models, routes
+// each model family to the protocol the gateway serves natively, and shows the
+// wallet balance in yuan. Image models (gpt-image) reach Magpie's image
+// generation, which draws at /v1/images/* through the same fetch. A Key belongs
+// to one group on the site (GPT, Claude, DeepSeek…) or several, so customers
+// add one Magpie account per Key and Magpie fails over between them. The site owns group selection, pricing and billing.
 //
 // Magpie selects the account before invoking the loader. Each loader captures
 // that account's Key, replaces caller authentication and returns the upstream
@@ -87,7 +88,7 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
             Object.keys(provider.models).length === 0
           ) {
             result.error =
-              "此密钥所属分组没有可用的对话模型（生图分组不能用于对话）。请到 zszapi.com「API 密钥」页更换分组，再在 Magpie 点「重新获取模型」。";
+              "此密钥所属分组没有 Magpie 可用的模型。请到 zszapi.com「API 密钥」页更换分组，再在 Magpie 点「重新获取模型」。";
           }
           return result;
         } catch (error) {
@@ -101,7 +102,7 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
     },
     provider: {
       id: PROVIDER,
-      /** models discovers the current Key's chat models. Query failures
+      /** models discovers the current Key's chat and image models. Query failures
        * propagate so Magpie keeps its previous list; an empty successful list
        * replaces it, including revoked permissions.
        */
@@ -190,7 +191,7 @@ async function nameAccount(client, account, queries, catalogue) {
 }
 
 /** forward sends one generation request with the selected account's Key.
- * Requests must target that account's text endpoints; caller authentication
+ * Requests must target that account's text or image endpoints; caller authentication
  * is replaced, Gemini's version prefix is corrected, redirects fail, and the
  * returned Response keeps its stream and cancellation. A 401 clears cached
  * metadata for the account.
@@ -208,7 +209,14 @@ async function forward(account, input, init, queries) {
     /^models\/.+:(?:streamGenerateContent|generateContent|countTokens)$/.test(operation);
   if (
     !gemini &&
-    !["messages", "messages/count_tokens", "responses", "chat/completions"].includes(operation)
+    ![
+      "messages",
+      "messages/count_tokens",
+      "responses",
+      "chat/completions",
+      "images/generations",
+      "images/edits",
+    ].includes(operation)
   ) {
     throw new Error("执算者AI 插件不支持此请求接口。");
   }

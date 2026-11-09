@@ -27,6 +27,13 @@ const CATALOGUES = {
     { id: "gpt-image-2.5" },
     { id: "gpt-image-2.5-sunburst" },
   ],
+  "Bearer sk-multi-group-3b78": [
+    { id: "claude-opus-5-5" },
+    { id: "deepseek-v4.1-flash" },
+    { id: "gpt-6.1-sol", display_name: "GPT-6.1 Sol" },
+    { id: "gpt-image-2", display_name: "GPT Image 2" },
+    { id: "gpt-image-2.6" },
+  ],
   "Bearer sk-mixed-0000": [
     { id: "gemini-3.8-flash" },
     { id: "grok-4.6" },
@@ -196,15 +203,56 @@ test("protocol overrides apply to models without server protocols", async (t) =>
   assert.ok(!Object.hasOwn(models, "gpt-disabled"));
 });
 
-test("image-only groups produce no chat models and an explanatory usage card", async (t) => {
+test("images-API models are listed as image-only models on the OpenAI-compatible package", async (t) => {
+  const fixture = await gateway(t);
+  const hooks = await ZszapiPlugin({}, {
+    modelProtocols: { "gpt-image-2.5": "anthropic_messages" },
+  });
+  const auth = fixture.auth("sk-image-only-d5f7");
+  const models = await hooks.provider.models({}, { auth });
+  assert.deepEqual(Object.keys(models), ["gpt-image-2.5", "gpt-image-2.5-sunburst"]);
+  const image = models["gpt-image-2.5"];
+  // Magpie's image generation picker requires the OpenAI-compatible package
+  // and draws at {api.url}/images/*; protocol overrides never apply.
+  assert.equal(image.api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(image.api.url, fixture.base + "/v1");
+  assert.equal(image.providerID, "zszapi");
+  assert.equal(image.capabilities.output.image, true);
+  assert.equal(image.capabilities.output.text, false);
+  assert.equal(image.capabilities.input.image, true);
+  assert.equal(image.capabilities.toolcall, false);
+  const usage = await hooks.auth.usage(async () => auth, { models });
+  assert.equal(usage.plan, "余额 ¥88.50");
+  assert.equal(usage.error, undefined);
+});
+
+test("multi-group Keys list chat and image models together", async (t) => {
   const fixture = await gateway(t);
   const hooks = await ZszapiPlugin();
-  const auth = fixture.auth("sk-image-only-d5f7");
+  const models = await hooks.provider.models({}, { auth: fixture.auth("sk-multi-group-3b78") });
+  assert.deepEqual(Object.keys(models), [
+    "claude-opus-5-5",
+    "deepseek-v4.1-flash",
+    "gpt-6.1-sol",
+    "gpt-image-2",
+    "gpt-image-2.6",
+  ]);
+  assert.equal(models["gpt-6.1-sol"].api.npm, "@ai-sdk/openai");
+  assert.equal(models["gpt-6.1-sol"].capabilities.output, undefined);
+  assert.equal(models["gpt-image-2"].api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(models["gpt-image-2"].name, "GPT Image 2");
+  assert.equal(models["gpt-image-2.6"].capabilities.output.image, true);
+});
+
+test("Keys without usable models get an explanatory usage card", async (t) => {
+  const fixture = await gateway(t);
+  const hooks = await ZszapiPlugin();
+  const auth = fixture.auth("sk-empty-0000");
   const models = await hooks.provider.models({}, { auth });
   assert.deepEqual(Object.keys(models), []);
   const usage = await hooks.auth.usage(async () => auth, { models });
   assert.equal(usage.plan, "余额 ¥88.50");
-  assert.match(usage.error, /生图分组/);
+  assert.match(usage.error, /更换分组/);
   const fine = await hooks.auth.usage(async () => auth, { models: { a: {} } });
   assert.equal(fine.error, undefined);
   const fellBack = await hooks.auth.usage(async () => auth, { models: {}, fellBack: true });
@@ -223,6 +271,8 @@ test("new accounts are named by site, model family and Key suffix", async (t) =>
   }));
   await hooks.provider.models({}, { auth: fixture.auth("sk-claude-group-c1c1") });
   await hooks.auth.loader(async () => fixture.auth("sk-mixed-0000"));
+  await hooks.auth.loader(async () => fixture.auth("sk-image-only-d5f7"));
+  await hooks.auth.loader(async () => fixture.auth("sk-multi-group-3b78"));
   await hooks.auth.loader(async () => fixture.auth("abcd"));
   assert.deepEqual(
     saved.map((entry) => entry.body.accountId),
@@ -230,6 +280,8 @@ test("new accounts are named by site, model family and Key suffix", async (t) =>
       "执算者AI · GPT · 尾号 8bfa",
       "执算者AI · Claude · 尾号 c1c1",
       "执算者AI · Gemini/Grok/Claude · 尾号 0000",
+      "执算者AI · 生图 · 尾号 d5f7",
+      "执算者AI · Claude/DeepSeek/GPT/生图 · 尾号 3b78",
       "执算者AI · API Key",
     ],
   );
@@ -294,7 +346,8 @@ test("generation isolates Keys and forwards all four text protocols", async (t) 
     }
   }
   await assert.rejects(loaders[0].fetch("https://example.com/v1/messages"), /不一致/);
-  await assert.rejects(loaders[0].fetch(fixture.base + "/v1/images/generations"), /不支持/);
+  await assert.rejects(loaders[0].fetch(fixture.base + "/v1/images/variations"), /不支持/);
+  await assert.rejects(loaders[0].fetch(fixture.base + "/v1/embeddings"), /不支持/);
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
@@ -305,6 +358,42 @@ test("generation isolates Keys and forwards all four text protocols", async (t) 
     }),
     { name: "AbortError" },
   );
+});
+
+test("image generation and edits are forwarded with the account's Key", async (t) => {
+  const fixture = await gateway(t);
+  const hooks = await ZszapiPlugin();
+  const loader = await hooks.auth.loader(async () => fixture.auth("sk-image-only-d5f7"));
+  const body = JSON.stringify({ model: "gpt-image-2", prompt: "a magpie", n: 1 });
+  await loader.fetch(loader.baseURL + "/images/generations", {
+    method: "POST",
+    headers: { Authorization: "Bearer caller", "Content-Type": "application/json" },
+    body,
+  });
+  let observed = fixture.requests.at(-1);
+  assert.equal(observed.url, "/v1/images/generations");
+  assert.equal(observed.body, body);
+  assert.equal(observed.headers.authorization, "Bearer sk-image-only-d5f7");
+  assert.equal(observed.headers["x-api-key"], undefined);
+
+  // Magpie sends an edit as multipart form data; the boundary must survive.
+  const form = new FormData();
+  form.set("model", "gpt-image-2");
+  form.set("prompt", "make it blue");
+  form.set("image", new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }), "image0.png");
+  await loader.fetch(loader.baseURL + "/images/edits", {
+    method: "POST",
+    headers: { Authorization: "Bearer caller" },
+    body: form,
+  });
+  observed = fixture.requests.at(-1);
+  assert.equal(observed.url, "/v1/images/edits");
+  assert.equal(observed.headers.authorization, "Bearer sk-image-only-d5f7");
+  const boundary = observed.headers["content-type"].match(/^multipart\/form-data; boundary=(.+)$/)?.[1];
+  assert.ok(boundary);
+  assert.ok(observed.body.includes("--" + boundary));
+  assert.ok(observed.body.includes('name="prompt"\r\n\r\nmake it blue'));
+  assert.ok(observed.body.includes('filename="image0.png"'));
 });
 
 test("streaming returns the first chunk immediately and stays cancellable", { timeout: 3000 }, async (t) => {

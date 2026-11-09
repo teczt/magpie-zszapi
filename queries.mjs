@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 // USER_AGENT identifies plugin metadata queries in the site's request logs.
-export const USER_AGENT = "magpie-zszapi/0.1.0";
+export const USER_AGENT = "magpie-zszapi/0.2.0";
 
 // queries.mjs reads 执算者AI model and usage metadata with account-isolated
 // request sharing. Magpie can ask several hooks for the same account while
