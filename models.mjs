@@ -4,6 +4,8 @@
 // lists carry no protocol metadata; the model family chooses the text API the
 // gateway serves natively for that family. Explicit server protocols, when a
 // future backend reports them, always take precedence over name inference.
+// Known models (KNOWN_MODELS) add the thinking levels, image input and limits
+// the list lacks.
 //
 // Images-API models (gpt-image, dall-e) are listed as image-only models on the
 // OpenAI-compatible package: Magpie offers them in its image generation picker
@@ -68,6 +70,50 @@ const FAMILIES = [
     capabilities: { toolcall: true },
   },
 ];
+
+// KNOWN_MODELS records per-model facts that Sub2API's /v1/models does not
+// carry (it returns only id, type, display_name and created_at): thinking
+// levels, image input and limits. The first matching entry applies on top of
+// the family defaults; server attributes, when present, still win.
+//
+// - DeepSeek V4.1 Flash thinks and reads images. zszapi.com accepted
+//   reasoning_effort off/low/medium/high/xhigh/max for it and refused "none"
+//   (400, measured 2026-11-10), so the "none" level sends "off", which the
+//   gateway's Mistral route also maps to that upstream's "none". The output
+//   limit is WorkBuddy's config value, below DeepSeek's 384K ceiling, so a
+//   request never asks more than every route accepts.
+// - DeepSeek V4 Pro / Flash think at DeepSeek's native high/max and are text only.
+const KNOWN_MODELS = [
+  {
+    test: /^deepseek-v4[.-]1-flash(?:[-_.]|$)/,
+    efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    wire: { none: "off" },
+    input: TEXT_IMAGE,
+    limit: { context: 1_000_000, output: 128_000 },
+  },
+  {
+    test: /^deepseek-v4-(?:pro|flash)(?:[-_.]|$)/,
+    efforts: ["high", "max"],
+    limit: { context: 1_000_000, output: 128_000 },
+  },
+];
+
+/** knownOf returns the per-model facts for one model ID, or undefined. */
+function knownOf(id) {
+  const name = baseName(id);
+  return KNOWN_MODELS.find((known) => known.test.test(name));
+}
+
+/** effortVariants turns thinking levels into Magpie variants. Each variant
+ * carries the AI SDK option, so picking a level sends reasoning_effort; wire
+ * renames a level to the value the site accepts.
+ */
+function effortVariants(efforts, wire = {}) {
+  const variants = Object.create(null);
+  for (const effort of efforts)
+    variants[effort] = { reasoningEffort: wire[effort] ?? effort };
+  return variants;
+}
 
 /** familyOf returns the recognized family of one model ID, or undefined.
  * Composite group prefixes ("work/claude-…") are ignored for recognition only.
@@ -201,6 +247,12 @@ export function runtimeModel(model, base, overrides) {
   const [, npm, suffix] = endpoint;
   const attrs = model.attributes || {};
   const capabilities = structuredClone(familyOf(model.id)?.capabilities || {});
+  const known = knownOf(model.id);
+  if (known?.efforts) capabilities.reasoning = true;
+  if (known?.input) {
+    capabilities.input = { ...known.input };
+    if (known.input.image) capabilities.attachment = true;
+  }
   for (const [source, target] of [
     ["reasoning", "reasoning"],
     ["tool_call", "toolcall"],
@@ -225,7 +277,7 @@ export function runtimeModel(model, base, overrides) {
     }
   }
   if (attrs.interleaved !== undefined) capabilities.interleaved = attrs.interleaved;
-  const variants = Object.create(null);
+  let variants = Object.create(null);
   for (const option of Array.isArray(attrs.reasoning_options)
     ? attrs.reasoning_options
     : []) {
@@ -235,7 +287,16 @@ export function runtimeModel(model, base, overrides) {
       if (typeof value === "string" && value) variants[value] = {};
     }
   }
-  const limit = {};
+  // Without server levels, known models offer their own unless the server
+  // said the model does not think.
+  if (
+    !Array.isArray(attrs.reasoning_options) &&
+    known?.efforts &&
+    capabilities.reasoning === true
+  ) {
+    variants = effortVariants(known.efforts, known.wire);
+  }
+  const limit = { ...known?.limit };
   for (const [source, target] of [
     ["context", "context"],
     ["input_limit", "input"],

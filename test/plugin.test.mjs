@@ -193,6 +193,60 @@ test("each family uses the protocol the gateway serves natively", async (t) => {
   assert.equal(mixed["claude-explicit"].api.npm, "@ai-sdk/openai-compatible");
 });
 
+test("DeepSeek models get thinking levels, image input and limits the site list lacks", async (t) => {
+  const fixture = await gateway(t);
+  const hooks = await ZszapiPlugin();
+  const multi = await hooks.provider.models({}, { auth: fixture.auth("sk-multi-group-3b78") });
+  const flash = multi["deepseek-v4.1-flash"];
+  assert.equal(flash.api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(flash.capabilities.reasoning, true);
+  assert.equal(flash.capabilities.toolcall, true);
+  assert.equal(flash.capabilities.attachment, true);
+  assert.equal(flash.capabilities.input.image, true);
+  assert.equal(flash.capabilities.input.text, true);
+  assert.deepEqual(flash.limit, { context: 1_000_000, output: 128_000 });
+  assert.deepEqual(Object.keys(flash.variants), ["none", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(flash.variants.max, { reasoningEffort: "max" });
+  // zszapi.com refuses reasoning_effort "none" for this model and accepts "off".
+  assert.deepEqual(flash.variants.none, { reasoningEffort: "off" });
+
+  const deepseek = await hooks.provider.models({}, { auth: fixture.auth("sk-deepseek-be7c") });
+  for (const id of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
+    assert.equal(deepseek[id].capabilities.reasoning, true, id);
+    assert.equal(deepseek[id].capabilities.input.image, false, id);
+    assert.deepEqual(Object.keys(deepseek[id].variants), ["high", "max"], id);
+    assert.equal(deepseek[id].limit.context, 1_000_000, id);
+  }
+
+  // Families without known facts keep their defaults and invent nothing.
+  const mixed = await hooks.provider.models({}, { auth: fixture.auth("sk-mixed-0000") });
+  assert.deepEqual(Object.keys(mixed["grok-4.6"].variants), []);
+  assert.deepEqual(mixed["grok-4.6"].limit, {});
+  assert.equal(mixed["grok-4.6"].capabilities.reasoning, undefined);
+});
+
+test("server attributes still override known model facts", async () => {
+  const { runtimeModel } = await import("../models.mjs");
+  const off = runtimeModel(
+    { id: "deepseek-v4.1-flash", attributes: { reasoning: false, context: 64_000 } },
+    "https://zszapi.com",
+    {},
+  );
+  assert.equal(off.capabilities.reasoning, false);
+  assert.deepEqual(Object.keys(off.variants), []);
+  assert.deepEqual(off.limit, { context: 64_000, output: 128_000 });
+
+  const listed = runtimeModel(
+    {
+      id: "deepseek-v4-1-flash-1017",
+      attributes: { reasoning: true, reasoning_options: [{ type: "effort", values: ["high"] }] },
+    },
+    "https://zszapi.com",
+    {},
+  );
+  assert.deepEqual(Object.keys(listed.variants), ["high"]);
+});
+
 test("protocol overrides apply to models without server protocols", async (t) => {
   const fixture = await gateway(t);
   const hooks = await ZszapiPlugin({}, {

@@ -52,6 +52,15 @@ Key 能用的生图模型（`gpt-image-*`）也会出现在模型列表里，标
 | DeepSeek、Grok 及其他 | `/v1/chat/completions` | `@ai-sdk/openai-compatible` |
 | 生图（gpt-image、dall-e） | `/v1/images/generations`、`/v1/images/edits` | `@ai-sdk/openai-compatible`（只出图） |
 
+站点的模型列表只有模型 ID，不带能力信息，所以插件为已知模型补上思考等级、图片输入和上下文长度：
+
+| 模型 | 思考等级 | 图片输入 | 上下文 / 最大输出 |
+| --- | --- | --- | --- |
+| `deepseek-v4.1-flash` | none / low / medium / high / xhigh / max | 支持 | 1,000,000 / 128,000 |
+| `deepseek-v4-pro`、`deepseek-v4-flash` | high / max | 不支持 | 1,000,000 / 128,000 |
+
+选 none 即关闭思考（实际发送 `reasoning_effort: "off"`，这是站点接受的写法）。服务端以后返回这些属性时，以服务端为准。
+
 服务端以后返回 `protocols` 字段时，以服务端为准。名称识别不了的自定义别名，可以按完整模型 ID 指定协议：
 
 ```sh
