@@ -7,7 +7,16 @@ import {
   validateModelProtocols,
 } from "./models.mjs";
 import { createQueries } from "./queries.mjs";
-import { SITE, currencyOf, usageOf } from "./usage.mjs";
+import { KR_SITE, SITE, currencyOf, usageOf } from "./usage.mjs";
+
+/** ROUTE_OPTION is the switch on the provider's editor that moves every
+ * request to the Seoul relay. Magpie hands its current value to the plugin on
+ * each read, so turning it on or off needs no sign-in and no restart. */
+const ROUTE_OPTION = "route_kr";
+/** OFFICIAL_SITES are the site's own addresses. An account saved with one of
+ * them follows the route switch; any other saved address (staging, a
+ * self-hosted mirror) is kept as it is. */
+const OFFICIAL_SITES = [SITE, KR_SITE];
 
 // index.mjs connects Magpie to 执算者AI (https://zszapi.com). A customer pastes
 // one API Key; the plugin discovers that Key's chat and image models, routes
@@ -28,13 +37,27 @@ import { SITE, currencyOf, usageOf } from "./usage.mjs";
  * - modelProtocols: { "<model id>": "<protocol>" } exact protocol overrides.
  * - baseURL: alternative site address, for staging or self-hosted mirrors.
  * - name: provider display name.
+ *
+ * Route switch (the provider's editor, Plugin options): "route_kr" off sends
+ * requests to baseURL (zszapi.com by default), on sends them to kr.zszapi.com.
  */
-export async function ZszapiPlugin({ client } = {}, options = {}) {
+export async function ZszapiPlugin({ client, magpie } = {}, options = {}) {
   options ??= {};
   const configuredBase = normalizeBase(options.baseURL || SITE);
   const currency = currencyOf(options.currency);
   const modelProtocols = validateModelProtocols(options.modelProtocols);
   const queries = createQueries();
+  /** routeKr reads the route switch as it is now. Hosts without plugin
+   * options (OpenCode, older Magpie) never turn it on. */
+  const routeKr = async () => {
+    try {
+      return (await magpie?.option?.(PROVIDER, ROUTE_OPTION)) === true;
+    } catch {
+      return false;
+    }
+  };
+  /** current resolves an account against the route switch at call time. */
+  const current = async (auth) => accountOf(auth, configuredBase, await routeKr());
   return {
     /** config declares the provider before any account exists. Existing user
      * configuration takes precedence, including its display name and models.
@@ -61,16 +84,34 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
           },
         },
       ],
-      /** loader binds generation to the current account's address and Key.
-       * The placeholder API key is replaced inside fetch.
+      /** options declares the route switch, drawn under the accounts. */
+      options: [
+        {
+          key: ROUTE_OPTION,
+          label: "China-optimized route (kr.zszapi.com)",
+          labels: { zh: "国内优化线路（kr.zszapi.com）" },
+          description:
+            "Off: connect to zszapi.com directly (default). On: use the China-optimized route kr.zszapi.com, often steadier from mainland China. Applies from the next request; no sign-in needed.",
+          descriptions: {
+            zh: "关闭：直连 zszapi.com（默认）。打开：走国内优化线路 kr.zszapi.com，国内部分网络（如移动）通常更稳。切换后下一个请求即生效，无需重新登录。",
+          },
+          placement: "top",
+        },
+      ],
+      /** loader binds generation to the current account's Key. The address is
+       * resolved again on every request, so the route switch applies to
+       * sessions that are already open. The placeholder API key is replaced
+       * inside fetch.
        */
       async loader(getAuth) {
-        const account = accountOf(await getAuth(), configuredBase);
+        const account = await current(await getAuth());
         await nameAccount(client, account, queries);
+        const loaded = account.base;
         return {
-          baseURL: account.base + "/v1",
+          baseURL: loaded + "/v1",
           apiKey: "zszapi-plugin",
-          fetch: (input, init) => forward(account, input, init, queries),
+          fetch: async (input, init) =>
+            forward(await current(account.auth), [loaded, ...OFFICIAL_SITES], input, init, queries),
         };
       },
       /** usage returns the balance card or a user-visible query failure.
@@ -78,7 +119,7 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
        */
       async usage(getAuth, provider) {
         try {
-          const account = accountOf(await getAuth(), configuredBase);
+          const account = await current(await getAuth());
           const body = await queries.get(account, "/v1/usage");
           const result = usageOf(body, { currency });
           if (
@@ -114,7 +155,7 @@ export async function ZszapiPlugin({ client } = {}, options = {}) {
           kept[Symbol.for("magpie.fellBack")] = true;
           return kept;
         }
-        const account = accountOf(auth, configuredBase);
+        const account = await current(auth);
         const body = await queries.get(account, "/v1/models");
         await nameAccount(client, account, queries, body);
         const models = Object.create(null);
@@ -151,17 +192,21 @@ function normalizeBase(value) {
   return url.href.replace(/\/+$/, "").replace(/\/v1(?:beta)?$/, "");
 }
 
-/** accountOf resolves one saved Key and its private identity. Saved addresses
- * take precedence over the configured default so existing accounts keep
- * working if the option changes.
+/** accountOf resolves one saved Key, the address it is sent to now, and its
+ * private identity. An account saved with one of the site's own addresses
+ * follows the route switch: on is the Seoul relay, off is the configured
+ * baseURL. Any other saved address (staging, a self-hosted mirror) is kept,
+ * so those accounts keep working whatever the switch says.
  */
-function accountOf(auth, configuredBase) {
+function accountOf(auth, configuredBase, routeKr = false) {
   if (auth?.type !== "api" || typeof auth.key !== "string" || !auth.key.trim()) {
     throw Object.assign(new Error("请先添加执算者AI API Key。"), {
       signIn: "expired",
     });
   }
-  const base = normalizeBase(auth.metadata?.baseURL || configuredBase);
+  const saved = auth.metadata?.baseURL ? normalizeBase(auth.metadata.baseURL) : "";
+  const base =
+    saved && !OFFICIAL_SITES.includes(saved) ? saved : routeKr ? KR_SITE : configuredBase;
   const key = auth.key.trim();
   const identity = createHash("sha256").update(base + "\0" + key).digest("hex");
   return { auth, base, key, identity };
@@ -190,21 +235,31 @@ async function nameAccount(client, account, queries, catalogue) {
   account.auth = { ...account.auth, accountId };
 }
 
-/** forward sends one generation request with the selected account's Key.
- * Requests must target that account's text or image endpoints; caller authentication
- * is replaced, Gemini's version prefix is corrected, redirects fail, and the
+/** forward sends one generation request with the selected account's Key to
+ * the account's current address. The caller may address any of `accepted`
+ * (the address the session was loaded with, or one of the site's own), since
+ * model lists and loaders opened before a route switch still carry the old
+ * one; the request is moved to the current address, so the Key only ever goes
+ * there. Only text and image endpoints are allowed; caller authentication is
+ * replaced, Gemini's version prefix is corrected, redirects fail, and the
  * returned Response keeps its stream and cancellation. A 401 clears cached
  * metadata for the account.
  */
-async function forward(account, input, init, queries) {
+async function forward(account, accepted, input, init, queries) {
   const request = new Request(input, init);
-  const url = new URL(request.url);
-  const base = new URL(account.base);
-  const prefix = base.pathname.replace(/\/$/, "") + "/v1/";
-  if (url.origin !== base.origin || !url.pathname.startsWith(prefix)) {
+  const source = new URL(request.url);
+  const prefixOf = (base) => base.pathname.replace(/\/$/, "") + "/v1/";
+  const from = accepted
+    .map((address) => new URL(address))
+    .find((base) => source.origin === base.origin && source.pathname.startsWith(prefixOf(base)));
+  if (!from) {
     throw new Error("模型请求地址与当前执算者AI账号不一致。");
   }
-  const operation = url.pathname.slice(prefix.length);
+  const operation = source.pathname.slice(prefixOf(from).length);
+  const base = new URL(account.base);
+  const prefix = prefixOf(base);
+  const url = new URL(base.origin + prefix + operation);
+  url.search = source.search;
   const gemini =
     /^models\/.+:(?:streamGenerateContent|generateContent|countTokens)$/.test(operation);
   if (

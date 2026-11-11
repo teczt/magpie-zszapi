@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 
 // USER_AGENT identifies plugin metadata queries in the site's request logs.
-export const USER_AGENT = "magpie-zszapi/0.2.0";
+// Keep the version equal to package.json (a test checks it).
+export const USER_AGENT = "magpie-zszapi/0.3.0";
 
 // queries.mjs reads 执算者AI model and usage metadata with account-isolated
 // request sharing. Magpie can ask several hooks for the same account while
@@ -220,7 +221,7 @@ async function readJSON(account, path) {
     throw new Error(
       signal.aborted
         ? "执算者AI 查询超时，请稍后重试。"
-        : "无法连接 zszapi.com，请检查网络和代理。",
+        : `无法连接 ${new URL(account.base).host}，请检查网络和代理，或在供应商设置里切换线路。`,
     );
   }
   if (!response.ok) {

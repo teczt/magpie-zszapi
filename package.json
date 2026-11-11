@@ -1,6 +1,6 @@
 {
   "name": "magpie-zszapi",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "执算者AI (zszapi.com) for Magpie: paste one API Key to get GPT / Claude / DeepSeek chat models and gpt-image generation, with balance in ¥",
   "type": "module",
   "publishConfig": {

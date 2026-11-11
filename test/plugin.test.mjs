@@ -533,3 +533,109 @@ test("metadata queries identify the plugin", async (t) => {
   await hooks.provider.models({}, { auth: fixture.auth("sk-gpt-group-8bfa") });
   assert.match(fixture.requests.at(-1).headers["user-agent"], /^magpie-zszapi\//);
 });
+
+test("the user agent carries the package version", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { USER_AGENT } = await import("../queries.mjs");
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(USER_AGENT, `magpie-zszapi/${pkg.version}`);
+});
+
+test("the route switch is declared on the provider's editor", async () => {
+  const hooks = await ZszapiPlugin();
+  assert.equal(hooks.auth.options.length, 1);
+  const [option] = hooks.auth.options;
+  assert.equal(option.key, "route_kr");
+  assert.equal(option.placement, "top");
+  assert.match(option.labels.zh, /国内优化线路/);
+  assert.match(option.descriptions.zh, /无需重新登录/);
+  assert.equal(option.default, undefined);
+});
+
+/** officialSite intercepts fetch for the site's own addresses, which tests
+ * must never reach, and records where each request went with which Key. */
+function officialSite(t) {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    calls.push({ origin: url.origin, path: url.pathname, auth: request.headers.get("authorization") });
+    if (url.pathname === "/v1/models") {
+      return Response.json({ object: "list", data: [{ id: "gpt-6-astra", object: "model" }] });
+    }
+    if (url.pathname === "/v1/usage") {
+      return Response.json({ mode: "unrestricted", isValid: true, remaining: 1, unit: "USD", balance: 1 });
+    }
+    return new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } });
+  };
+  t.after(() => {
+    globalThis.fetch = real;
+  });
+  return calls;
+}
+
+test("the route switch moves open sessions, models and usage without a new sign-in", async (t) => {
+  const calls = officialSite(t);
+  const switches = { route_kr: false };
+  const magpie = { option: (provider, key) => provider === "zszapi" && switches[key] === true };
+  const hooks = await ZszapiPlugin({ magpie });
+  const auth = { type: "api", key: "sk-route-1234", metadata: { baseURL: "https://zszapi.com" } };
+
+  const loader = await hooks.auth.loader(async () => auth);
+  assert.equal(loader.baseURL, "https://zszapi.com/v1");
+  await loader.fetch(loader.baseURL + "/responses", { method: "POST", body: "{}" });
+  assert.deepEqual(calls.at(-1), { origin: "https://zszapi.com", path: "/v1/responses", auth: "Bearer sk-route-1234" });
+
+  // Turned on while the session is open: the next request goes to Seoul.
+  switches.route_kr = true;
+  await loader.fetch(loader.baseURL + "/responses", { method: "POST", body: "{}" });
+  assert.deepEqual(calls.at(-1), { origin: "https://kr.zszapi.com", path: "/v1/responses", auth: "Bearer sk-route-1234" });
+
+  // Models listed after the switch carry the Seoul address, and both
+  // addresses are still accepted by a loader opened earlier.
+  const models = await hooks.provider.models({}, { auth });
+  assert.equal(calls.at(-1).origin, "https://kr.zszapi.com");
+  assert.match(JSON.stringify(models["gpt-6-astra"]), /kr\.zszapi\.com/);
+  await loader.fetch("https://kr.zszapi.com/v1/messages", { method: "POST", body: "{}" });
+  assert.equal(calls.at(-1).origin, "https://kr.zszapi.com");
+  await hooks.auth.usage(async () => auth, {});
+  assert.deepEqual(calls.at(-1).origin + calls.at(-1).path, "https://kr.zszapi.com/v1/usage");
+
+  // Turned off again: back to the direct address, Gemini paths still rewritten.
+  switches.route_kr = false;
+  await loader.fetch("https://kr.zszapi.com/v1/models/gemini-3:streamGenerateContent?alt=sse", { method: "POST", body: "{}" });
+  assert.deepEqual(calls.at(-1), {
+    origin: "https://zszapi.com",
+    path: "/v1beta/models/gemini-3:streamGenerateContent",
+    auth: "Bearer sk-route-1234",
+  });
+
+  // Addresses outside the site are still refused, so the Key never leaves it.
+  const before = calls.length;
+  await assert.rejects(
+    loader.fetch("https://evil.example/v1/responses", { method: "POST", body: "{}" }),
+    /不一致/,
+  );
+  assert.equal(calls.length, before);
+});
+
+test("accounts saved with another address ignore the route switch", async (t) => {
+  const fixture = await gateway(t);
+  const hooks = await ZszapiPlugin({ magpie: { option: () => true } });
+  const loader = await hooks.auth.loader(async () => fixture.auth("sk-gpt-group-8bfa"));
+  assert.equal(loader.baseURL, fixture.base + "/v1");
+  const response = await loader.fetch(loader.baseURL + "/responses", { method: "POST", body: "{}" });
+  await response.text();
+  assert.equal(fixture.requests.at(-1).url, "/v1/responses");
+});
+
+test("hosts without plugin options stay on the direct address", async (t) => {
+  const calls = officialSite(t);
+  for (const input of [{}, { magpie: {} }, { magpie: { option: () => { throw new Error("x"); } } }]) {
+    const hooks = await ZszapiPlugin(input);
+    const loader = await hooks.auth.loader(async () => ({ type: "api", key: "sk-route-1234" }));
+    await loader.fetch(loader.baseURL + "/chat/completions", { method: "POST", body: "{}" });
+    assert.equal(calls.at(-1).origin, "https://zszapi.com");
+  }
+});

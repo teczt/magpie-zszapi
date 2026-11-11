@@ -13,6 +13,9 @@
 // asks for a new Key.
 
 export const SITE = "https://zszapi.com";
+/** KR_SITE is the Seoul relay in front of the same site, chosen by the
+ * "route_kr" plugin option. It serves the same accounts, Keys and APIs. */
+export const KR_SITE = "https://kr.zszapi.com";
 export const RECHARGE_URL = SITE + "/purchase";
 
 const DAY_SECONDS = 86400;
